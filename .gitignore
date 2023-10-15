@@ -3,7 +3,7 @@
 .vscode/c_cpp_properties.json
 .vscode/launch.json
 .vscode/ipch
-lib/README
-include/README
 Laser Tag.code-workspace
 .vscode/extensions.json
+lib
+include
