@@ -1,39 +1,7 @@
-#include <Arduino.h>
-#include <WiFiMulti.h>
-#include <HTTPClient.h>
-#include <CuteBuzzerSounds.h>
-
-/// DEFINING WIFI/SERVER RELATED STUFF
-#define WIFI_SSID "SSID"
-#define WIFI_PASSWD "PASSWORD"
-#define PLAYER_ID 1
-
-/// DEFINING PIN NUMBERS
-#define LDR_PIN_BACK 31
-#define LDR_PIN_FRONT1 32
-#define LDR_PIN_FRONT2 12
-#define LASER_PIN 27
-#define TRIGGER 35
-#define VIBRATION 34
-#define BUZZER 33
-
-/// SETTING UP GAME VARIABLES
-int ammo = 12; // Set this value based on the number of bullets you want to give to the player. Make sure to set it in reload() as well
-bool isPlayerDead = false;
-int pinIN_LDR[3] = {LDR_PIN_FRONT1, LDR_PIN_FRONT2, LDR_PIN_BACK};
-int pinIN[1] = {TRIGGER};
-int pinOUT[2] = {LASER_PIN, VIBRATION};
-
-/// SETTING UP WIFI AND SERVER VARIABLES
-WiFiMulti wifiMulti;
-HTTPClient http;
-string server = "https://YOURGAMESERVER.com" // Replace this with your game server URL
-
-    /// DEFINING TASK HANDLES FOR DUAL CORE PROGRAMMING AND SOFWATE INTERRUPTING
-    TaskHandle_t ArmourTask,
-       softwareINT;
+#include "Laser-Tag-LDR.h"
 
 /// SETTING INPUT PINS
+/// The exception handling has been added since the number of general pinINs and LDR pinINs mismatch
 void setPinIN()
 {
   for (int i = 0; i < sizeof(pinIN) / sizeof(pinIN[0]); i++)
@@ -69,6 +37,10 @@ void setup()
   setPinIN();
   setPinOUT();
 
+  /// Setting up the Hardware Interrupt to trigger on a RISING edge
+  attachInterrupt(digitalPinToInterrupt(INTERRUPT_PIN), deathInterrupt, RISING);
+
+  /// Connecting to the WiFi network
   wifiMulti.addAP(WIFI_SSID, WIFI_PASSWD);
   Serial.println("Connecting to WiFi...");
   while (wifiMulti.run() != WL_CONNECTED)
@@ -77,22 +49,8 @@ void setup()
   }
   Serial.println("Connected to the WiFi network!");
 
-  /*String matchTimer = server + "?matchTimerAPIRequest";
-  http.begin(server.c_str());
-  int httpResponseCode = http.GET();
-  if (httpResponseCode > 0)
-  {
-    Serial.print("HTTP Response code: ");
-    Serial.println(httpResponseCode);
-    String payload = http.getString();
-    Serial.println(payload);
-  }
-  else
-  {
-    Serial.print("Error code: ");
-    Serial.println(httpResponseCode);
-  }
-  http.end();*/
+  /// API Request to check if the match has started or not
+  http.begin((server + "?hasMatchStarted").c_str());
 
   /// Running code for the Armour, containing player LDRs, on Core 0
   /// With this, both the LaserTag and Armor code will run simultaneously
@@ -106,6 +64,23 @@ void setup()
       0);
 }
 
+/// Here, I am shorting two GPIO pins in order to emulate a hardware interrupt.
+/// When a player dies, the shorted interrupt circuit is set to HIGH which triggers the interrupt on core 1, running the following death loop.
+/// After the loop is done, the interrupt circuit is set to LOW, and the control flow is returned back to the original loop.
+/// The Player remains dead for 8 seconds. This can be tweaked.
+void deathInterrupt()
+{
+  http.GET();
+  isPlayerDead = true;
+  for (int i = 0; i < 4; i++)
+    {
+      cute.play(S_BUTTON_PUSHED);
+      delay(2000);
+    }
+  digitalWrite(INT_CALL, LOW);
+  isPlayerDead = false;
+}
+
 void reload()
 {
   digitalWrite(VIBRATION, HIGH);
@@ -117,24 +92,45 @@ void reload()
 
 void ArmourLoop(void *parameter)
 {
-  while (true)
+  http.begin((server + "?playerShot=" + PLAYER_ID).c_str());
+  while (!isPlayerDead)
   {
     for (int i = 0; i < 3; i++)
     {
-      if (analogRead(pinIN_LDR[i]) > 750) // Set this threshold value based on your Ambient Light, Laser Intensity, distance, etc
+      if (analogRead(pinIN_LDR[i]) > 750) /// Set this threshold value based on your Ambient Light, Laser Intensity, distance, etc
       {
         // Serial.println("Player " + (String)PLAYER_ID + " is dead! because of sensor " + (String)pinIN_LDR[i]);
-        isPlayerDead = true;
+        digitalWrite(INT_CALL, HIGH);
         break;
       }
     }
   }
+  http.end();
 }
 
 void loop()
 {
-  if (!isPlayerDead)
+  /// Every 10 seconds, send a GET request via the designated API to check if the match has started
+  /// Note, the API Requests are just dummy requests. You can setup your own http and API structure to handle the loop accordingly
+  http.GET();
+  int matchStarted = http.getString().toInt();
+
+  while(matchStarted)
   {
+    /// Every five minutes, check whether the match has ended or not. 
+    /// If it has, set the esp32 in a limbo state until the reset button is pressed or power is turned off
+    if ((millis() - lastTime) > 300000)
+    {
+      http.GET();
+      matchStarted = http.getString().toInt();
+      if(!matchStarted)
+      {
+        http.end();
+        exit(0);
+      }
+    }
+
+    /// If Player presses the trigger and has ammo, let them shoot. Otherwise, call the reload subroutine
     if (digitalRead(TRIGGER) == HIGH && ammo != 0)
     {
       Serial.println("Shooting laser!");
@@ -152,13 +148,5 @@ void loop()
     }
   }
 
-  else
-  {
-    for (int i = 0; i < 4; i++)
-    {
-      cute.play(S_BUTTON_PUSHED);
-      delay(2000);
-    }
-    isPlayerDead = false;
-  }
+  delay(10000);
 }
